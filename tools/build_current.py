@@ -72,6 +72,8 @@ def out(*args, cwd=None):
 def prepare(tree):
 	if not (tree / '.git').exists():
 		tree.mkdir(parents=True, exist_ok=True)
+		if any(tree.iterdir()):
+			raise SystemExit(f'{tree} is not empty: choose a separate build tree')
 		run('git', 'init', '-q', tree)
 		run('git', 'config', 'core.autocrlf', 'false', cwd=tree)
 		run('git', 'remote', 'add', 'origin', UPSTREAM, cwd=tree)
@@ -89,7 +91,8 @@ def prepare(tree):
 
 def main():
 	ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-	ap.add_argument('--tree', type=Path, default=ROOT / 'build/current')
+	ap.add_argument('--tree', type=Path, default=ROOT / 'build/current',
+	                help='dedicated build directory (must be empty on first use)')
 	ap.add_argument('--cross', default=os.environ.get('CROSS', str(ROOT / 'toolchain/bin/csky-elf-')))
 	ap.add_argument('--jobs', type=int, default=min(os.cpu_count() or 2, 8))
 	ap.add_argument('--no-mdc1200', action='store_true', help='build with CONFIG_MDC1200=n (MDC-1200 ID on FM channels)')
