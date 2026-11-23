@@ -1,0 +1,114 @@
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -808,15 +808,25 @@
+ 	radio_mode_t mode = (CONFIG_DMR && sm->view.ch.mode == RADIO_MODE_DMR && !parked(&sm->view.ch)) ?
+ 		RADIO_MODE_DMR : RADIO_MODE_FM;
+ 	// P25, NXDN and YSF run with the board in its digital mode, the DMR stack stopped; a retune starts the engine over
+ 	bool air = air_mode(sm->view.ch.mode);
++	bool air_same = false;
+ 	if (air) {
+ 		mode = (radio_mode_t)sm->view.ch.mode;
++#if CONFIG_P25
++		air_same = air_same || (mode == RADIO_MODE_P25 && radio_p25_running());
++#endif
++#if CONFIG_NXDN
++		air_same = air_same || (mode == RADIO_MODE_NXDN && radio_nxdn_running());
++#endif
++#if CONFIG_YSF
++		air_same = air_same || (mode == RADIO_MODE_YSF && radio_ysf_running());
++#endif
+ 	}
+ 	// No sub-audio squelch in DMR, P25, NXDN or YSF, whatever tone the channel or the VFO still holds from its FM settings
+ 	static const subtone_t no_tone = { TONE_NONE, 0 };
+-	if (sm->board_mode == RADIO_MODE_DMR && mode != RADIO_MODE_DMR) {
+-		dmr_end(sm);		// the call stack (or an air mode) lets go of the modem before the chip leaves DMR
++	if (sm->board_mode == RADIO_MODE_DMR && mode != RADIO_MODE_DMR && !air_same) {
++		dmr_end(sm);		// DMR or another air mode lets go; a same-mode retune keeps the per-channel latches
+ 	}
+ #if CONFIG_AIR
+ 	if (!air && air_running()) {
+ 		air_stop(sm);		// to DMR: the engine closes and the vocoder's memory is back before DMR starts
+@@ -4159,12 +4169,18 @@
+ #endif
+ }
+ 
+ // ... and back on it (the channel or the VFO just loaded, not tuned yet)
+-static void dual_keep_load(radio_sm_t *sm, uint8_t i)
++static void dual_keep_load(radio_sm_t *sm, uint8_t i, bool another)
+ {
+ 	const radio_dual_keep_t *k = &sm->dual_keep[i];
+ 	if (!k->valid) {
++#if CONFIG_DMR
++		if (another) {
++			sm->manual = sm->one_shot = sm->hear_all_latch = false;
++			sm->view.dmr.target_manual = sm->view.dmr.one_shot = sm->view.dmr.hear_all_latch = false;
++		}
++#endif
+ 		return;
+ 	}
+ 	if (k->temp_power) {
+ 		sm->temp_power = true;
+@@ -4230,9 +4246,9 @@
+ 			return false;
+ 		}
+ 		vfo_use(sm, (uint8_t)r->pos);	// each channel its own VFO
+ 		enter_vfo(sm, now_ms);
+-		dual_keep_load(sm, i);
++		dual_keep_load(sm, i, sm->dual_at != i);
+ #if CONFIG_DMR
+ 		if (sm->dmr_running) {
+ 			dmr_configure(sm);	// a talk target or the hear all latch kept
+ 		}
+@@ -4252,9 +4268,9 @@
+ 		set_zone(sm, r->zone, z);	// the view reports the tuned channel's zone, as it does its position
+ 	}
+ 	set_channel(sm, r->pos, &ch);
+ #if CONFIG_DUAL_WATCH
+-	dual_keep_load(sm, i);
++	dual_keep_load(sm, i, sm->dual_at != i);
+ #endif
+ 	tune(sm, now_ms);
+ 	sm->dual_at = i;
+ 	return true;
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -8841,8 +8841,39 @@
+ 	CHECK(p25_seen && p1.begins >= p0.begins + 2 && n1.begins >= n0.begins + 2);
+ 	CHECK(ui_svc_dual(NULL, 0) && sm.view.scan == SCAN_OFF);
+ 	setup_codeplug_nxdn();
+ #endif
++	// Two NXDN96 channels keep independent digital-monitor latches while the receiver alternates
++	add(1, "NXDN A", 446100000, RADIO_MODE_NXDN, false, 0);
++	add(3, "NXDN B", 446200000, RADIO_MODE_NXDN, false, 2);
++	for (uint16_t n = 1; n <= 3; n += 2) {
++		chans[n].kind = CODEPLUG_KIND_NXDN;
++		chans[n].system = 0xFF;
++		stored_nxdn[n] = (nxdn_conv_cfg_t){ .conv = { .rate9600 = true, .rx_ran = 7, .tx_ran = 7,
++			.squelch = NXDN_SQUELCH_SELECTIVE }, .unit_id = 4321, .target = 20 };
++	}
++	start();
++	nxdn_defaults();
++	CHECK(ui_svc_dual(pair, 0) && sm.view.scan == SCAN_DUAL);
++	req(RREQ_DMR_HEAR_ALL, 1);
++	CHECK(sm.view.channel_number == 1 && sm.view.dmr.hear_all_latch);
++	for (int i = 0; i < 100 && sm.dual_at != 1; i++)
++		run(RADIO_POLL_MS);
++	CHECK(sm.dual_at == 1 && !sm.view.dmr.hear_all_latch);
++	CHECK(ui_svc_dual(pair, 1));
++	req(RREQ_DMR_HEAR_ALL, 1);
++	CHECK(sm.view.channel_number == 3 && sm.view.dmr.hear_all_latch);
++	uint8_t monitored = 0;
++	for (int i = 0; i < 500; i++) {
++		run(RADIO_POLL_MS);
++		if (sm.view.channel_number == 1 && sm.view.dmr.hear_all_latch)
++			monitored |= 1;
++		if (sm.view.channel_number == 3 && sm.view.dmr.hear_all_latch)
++			monitored |= 2;
++	}
++	CHECK(monitored == 3);
++	CHECK(ui_svc_dual(NULL, 0) && sm.view.scan == SCAN_OFF);
++	setup_codeplug_nxdn();
+ 	far_hz = 0;
+ 	nfar_stop();
+ 	nxdn_defaults();
+ }

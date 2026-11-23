@@ -1,0 +1,138 @@
+From c3abc45c33dbbed41f91a2ee134b6dc91d1eeaf5 Mon Sep 17 00:00:00 2001
+From: bdmhenderson-creator <bdmhenderson@gmail.com>
+Date: Sat, 21 Nov 2026 19:07:49 +0000
+Subject: [PATCH] Dual watch: fit the DMR row, never cut the CC (#856)
+
+Fixes #837.
+
+Row 3 of a DMR dual-watch pane (`440.6125 MHz  TS1 CC12`) was 198 px in a 189 px row on the 240 px big-font class, and the clip dropped the last glyph, so CC12 read as CC1. Row 3 now picks the longest of its shorter forms (`MHz` with one space, then no unit) that fits beside the PTT pill, and cuts the shortest at its end if none fits. `uiSim --layout` now reports a glyph the clip drops whole, so it catches this class of cut (64 problems to 0).
+
+DM-32UV radio test batch passed; stacks unchanged on every board.
+---
+ core/ui/gfx.c           |  5 ++++-
+ core/ui/ui_screens.c    | 50 +++++++++++++++++++++++++++++------------
+ tests/host/sim/ui_sim.c | 12 ++++++++--
+ 3 files changed, 50 insertions(+), 17 deletions(-)
+
+diff --git a/core/ui/gfx.c b/core/ui/gfx.c
+index 0707a92df..1362d348e 100644
+--- a/core/ui/gfx.c
++++ b/core/ui/gfx.c
+@@ -654,7 +654,10 @@ static int text(const font_t *f, int x, int y, const char *s, color_t fg, bool o
+ 	}
+ #endif
+ #ifdef GFX_FIT_TRACE
+-	trace(GFX_TRACE_TEXT, x0, y, x - x0, f->h, s0);	// after the glyph cells gfx_text_bg fills
++	// The whole text's width, not the cells drawn: the loop stops at the clip's edge, so a glyph that starts past it
++	// is dropped without a pixel cut, and a trace of the drawn cells alone hid that from the layout check ("CC12"
++	// shown as "CC1" at the screen's edge, #837). After the glyph cells gfx_text_bg fills
++	trace(GFX_TRACE_TEXT, x0, y, gfx_text_width(f, s0), f->h, s0);
+ #endif
+ 	return x;
+ }
+diff --git a/core/ui/ui_screens.c b/core/ui/ui_screens.c
+index 1120a3703..3414cfef4 100644
+--- a/core/ui/ui_screens.c
++++ b/core/ui/ui_screens.c
+@@ -2541,6 +2541,31 @@ static const font_t *dual_name_font(const ui_state_t *s, int i, const font_t *nf
+ 	return L->small;
+ }
+ 
++// Row 3's text: a DMR channel's frequency then its chips, else the chips. At their widest (440.6125, CC12) they
++// overflow the narrowest row they share (240 px less a bezel inset, the big font), so the shorter forms give up the
++// gap, then the unit, never a digit: the end was cut there before ("CC1", #837)
++static char dual_r3[80];	// its three forms: static, the ui task's stack is tight
++
++static void dual_row3(const ui_dual_pane_t *p, char *buf, size_t len)
++{
++	sbuf_t b;
++	sb_init(&b, buf, len);
++	if (p->mode != RADIO_MODE_DMR || p->vfo) {
++		sb_str(&b, p->detail);
++		return;
++	}
++	static const char *const sep[] = { " MHz  ", " MHz ", " " };
++	sb_str(&b, TEXT_ALT_OPEN);
++	for (unsigned k = 0; k < sizeof sep / sizeof sep[0]; k++) {
++		if (k)
++			sb_str(&b, TEXT_ALT_NEXT);
++		sb_freq(&b, p->rx_hz);
++		sb_str(&b, sep[k]);
++		sb_str(&b, p->detail);
++	}
++	sb_str(&b, TEXT_ALT_CLOSE);
++}
++
+ // A right-pointing triangle ah high (odd) and aw wide at x, y: the selected channel's mark
+ static void dual_arrow(int x, int y, int ah, int aw, color_t c)
+ {
+@@ -2624,13 +2649,8 @@ static void dual_pane(const radio_view_t *v, const ui_state_t *s, int i, int y,
+ 			need += gfx_text_width(dual_num_font(f), fit) + dual_num_font(f)->w / 2;
+ 		}
+ 		// Row 3 has room for it after the frequency and chips
+-		sb_init(&b, fit, sizeof fit);
+-		if (p->mode == RADIO_MODE_DMR && !p->vfo) {
+-			sb_freq(&b, p->rx_hz);
+-			sb_str(&b, " MHz  ");
+-		}
+-		sb_str(&b, p->detail);
+-		int room3 = w - x0 - gfx_text_width(ft->detail, fit) - 2 * ft->detail->w;
++		dual_row3(p, dual_r3, sizeof dual_r3);
++		int room3 = w - x0 - gfx_text_width(ft->detail, dual_r3) - 2 * ft->detail->w;
+ 		pill3 = x0 + need > w - dual_pill_w(word) - sm->w / 2 - 1 && room3 >= dual_pill_w(word);
+ 	}
+ 	if ((tx || sel) && !pill3) {
+@@ -2744,13 +2764,6 @@ static void dual_pane(const radio_view_t *v, const ui_state_t *s, int i, int y,
+ 	if (ft->detail != NULL) {
+ 		const font_t *df = ft->detail;
+ 		int y3 = y2 + tf->h;
+-		sb_init(&b, buf, sizeof buf);
+-		if (p->mode == RADIO_MODE_DMR && !p->vfo) {
+-			sb_freq(&b, p->rx_hz);
+-			sb_str(&b, " MHz  ");
+-		}
+-		sb_str(&b, p->detail);
+-		int lx = gfx_text(df, x0, y3, buf, ui_col.dim);
+ 		int r3 = w;
+ 		if (pill3) {
+ 			r3 -= dual_pill_w(word);
+@@ -2758,6 +2771,9 @@ static void dual_pane(const radio_view_t *v, const ui_state_t *s, int i, int y,
+ 				 tx ? ui_col.tx : ui_col.fg);
+ 			r3 -= sm->w / 2 + 1;
+ 		}
++		dual_row3(p, dual_r3, sizeof dual_r3);
++		gfx_text_fit(df, dual_r3, r3 - x0, buf, sizeof buf);
++		int lx = gfx_text(df, x0, y3, buf, ui_col.dim);
+ 		if (ft->zone)
+ 			gfx_text(df, x0, y3 + df->h, p->zone, ui_col.dim);
+ 		else
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index c0e36ceef..1d2ba217b 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -687,8 +687,9 @@ static const sim_contact_t contacts[] = {
+ };
+ #define N_CONTACTS	(sizeof contacts / sizeof contacts[0])
+ 
+-// Worst case (sim_worst): the same channels with 16-character names, numbered 985 to 1024; the same contacts with
+-// 16-character names, 8-digit talkgroups and 7-digit IDs; three zones of 80 channels with 16-character names
++// Worst case (sim_worst): the same channels with 16-character names, numbered 985 to 1024, on frequencies with four
++// decimals and color code 15; the same contacts with 16-character names, 8-digit talkgroups and 7-digit IDs; three
++// zones of 80 channels with 16-character names
+ static const char *const worst_ch[16] = {
+ 	"Johnson Peak Rpt", "COUNTY FIRE DISP", "Metro DMR Wide 2", "North Link TS2 B",
+ 	"Harbor Pilots Ch", "Airport Ops DMR1", "Lakeshore Rpt 22", "Ridge DMR Statew",
+@@ -890,6 +891,13 @@ bool codeplug_channel(uint16_t number, channel_t *out)
+ 		out->tx_tone.value = 1000;
+ 	}
+ 	out->color_code = 1;
++	if (worst) {
++		// The widest a frequency and a color code print: 453.6375, CC15. A 12.5 kHz channel with four
++		// decimals and a two-digit color code ran off dual watch's third row on the DM-32UV class (#837)
++		out->rx_hz += 12500;
++		out->tx_hz += 12500;
++		out->color_code = 15;
++	}
+ 	out->timeslot = 1;
+ 	out->contact = 1;	// TG 3100 USA
+ 	out->listen_list = 1;

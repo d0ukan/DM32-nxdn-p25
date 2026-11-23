@@ -58,6 +58,21 @@ PATCHES = (
 	'zone-digital-scan-50ms.patch',
 	# Zone scan: 25 ms settle and empty-channel dwell; VFO and dual watch keep their timing
 	'zone-scan-25ms.patch',
+	# P25/YSF VW: calibrate the software IMBE microphone input to the reference encoder's level
+	'p25-tx-voice-level.patch',
+	# RadioFoundry #856: dual-watch DMR row fits the full color code beside the PTT pill
+	'radiofoundry-856-dual-watch.patch',
+	# NXDN dual watch: retain independent digital-monitor latches across same-mode retunes
+	'nxdn-dual-monitor.patch',
+	# YSF: receive the call's actual AMBE/IMBE mode and restore the configured TX voice path
+	'ysf-cross-dt-rx.patch',
+	# NXDN96: admit trunked RTCH voice; keep DMon on the selected channel and report its real state
+	'nxdn-trunked-dmon.patch',
+	# FD6818: clear the FM receive sub-audio on entering DMR; a toned FM channel left it keyed on every digital TX
+	'digital-tx-subaudio-off.patch',
+	# Codec 2 (LGPL-2.1, 3200 bit/s files only) and M17 stream voice as a per-channel mode; --no-m17 leaves it out
+	'codec2-vendor.patch',
+	'm17-mode.patch',
 )
 
 
@@ -95,6 +110,7 @@ def main():
 	                help='dedicated build directory (must be empty on first use)')
 	ap.add_argument('--cross', default=os.environ.get('CROSS', str(ROOT / 'toolchain/bin/csky-elf-')))
 	ap.add_argument('--jobs', type=int, default=min(os.cpu_count() or 2, 8))
+	ap.add_argument('--no-m17', action='store_true', help='build with CONFIG_M17=n (M17 voice; Codec 2 real time on the MCU unverified)')
 	ap.add_argument('--no-mdc1200', action='store_true', help='build with CONFIG_MDC1200=n (MDC-1200 ID on FM channels)')
 	args = ap.parse_args()
 	tree = args.tree.resolve()
@@ -103,7 +119,7 @@ def main():
 	version = out('git', 'rev-parse', '--short=8', 'HEAD', cwd=ROOT)
 	git_time = out('git', 'log', '-1', '--format=%ct', 'HEAD', cwd=ROOT)
 	run('make', '-j%d' % args.jobs, 'BOARD=dm32', 'CROSS=' + args.cross, 'BUILD=build/dm32', 'GITVERSION=' + version,
-	    'GITDIRTY=', 'RFOUNDRY_GIT_TIME=' + git_time, 'CONFIG_MDC1200=' + ('n' if args.no_mdc1200 else 'y'),
+	    'GITDIRTY=', 'RFOUNDRY_GIT_TIME=' + git_time, 'CONFIG_MDC1200=' + ('n' if args.no_mdc1200 else 'y'), 'CONFIG_M17=' + ('n' if args.no_m17 else 'y'),
 	    'all', 'stack-check', cwd=tree)
 
 

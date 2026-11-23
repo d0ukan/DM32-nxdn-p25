@@ -1,0 +1,127 @@
+--- a/core/p25/p25Voice.c
++++ b/core/p25/p25Voice.c
+@@ -38,6 +38,7 @@
+ static uint8_t tx_gen;
+ static uint8_t tx_head, tx_tail;
+ static uint16_t mic_gain_q8 = 256;	// p25VoiceSetMicGain: the mic samples times this / 256 before encoding
++#define P25_TX_PREAMP	4u		// 12 dB PCM calibration into the software IMBE encoder, with saturation below
+ 
+ // Audio callback state
+ static uint8_t cb_tx_gen;		// the transmission the encoder runs for (even: none)
+@@ -216,11 +217,11 @@
+ static void tx_block(uint8_t g, const int16_t *mic)
+ {
+ 	int16_t scaled[AUDIO_BLOCK_SAMPLES];
+-	uint16_t gain = LOAD(mic_gain_q8);
++	uint32_t gain = P25_TX_PREAMP * LOAD(mic_gain_q8);
+ 	uint32_t peak = 0;
+ 
+ 	for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+-		int32_t v = gain == 256 ? mic[i] : ((int32_t)mic[i] * gain) / 256;
++		int32_t v = ((int32_t)mic[i] * (int32_t)gain) / 256;
+ 
+ 		v = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+ 		scaled[i] = (int16_t)v;
+--- a/tests/host/p25VoiceTest.c
++++ b/tests/host/p25VoiceTest.c
+@@ -232,20 +232,26 @@
+ }
+ 
+ // One block while transmitting: the speaker must stay silent
+-static void tx_blocks(int n, int amp)
++static uint32_t tx_blocks(int n, int amp)
+ {
+ 	int16_t mic[AUDIO_BLOCK_SAMPLES], spk[AUDIO_BLOCK_SAMPLES];
++	uint32_t peak = 0;
+ 
+ 	for (int i = 0; i < n; i++) {
+ 		mic_block(mic, amp);
+ 		memset(spk, 0x55, sizeof spk);
+ 		p25VoiceAudioBlock(mic, spk, NULL);
+-		for (int k = 0; k < AUDIO_BLOCK_SAMPLES; k++)
++		for (int k = 0; k < AUDIO_BLOCK_SAMPLES; k++) {
++			uint32_t a = (uint32_t)(mic[k] < 0 ? -mic[k] : mic[k]);
++			if (a > peak)
++				peak = a;
+ 			if (spk[k] != 0) {
+ 				CHECK(false, "speaker not silent while transmitting");
+-				return;
++				return peak;
+ 			}
++		}
+ 	}
++	return peak;
+ }
+ 
+ static void testTransmit(void)
+@@ -265,7 +271,7 @@
+ 	// The engine takes each frame as it is made: all of them arrive, and they say what the mic heard
+ 	imbe_state_reset(&st);
+ 	for (int i = 0; i < 30; i++) {
+-		tx_blocks(1, 6000);
++		tx_blocks(1, 1000);
+ 		while (hk->tx_voice(f, NULL)) {
+ 			got++;
+ 			if (imbe_unpack(&st, f, &pr) == IMBE_FRAME_OK && i >= 4) {
+@@ -284,7 +290,7 @@
+ 	      (unsigned)s.tx_encoded, (unsigned)s.tx_dropped);
+ 	CHECK(s.tx_mic_peak > 6000 && s.tx_mic_peak < 32768, "mic peak %u", (unsigned)s.tx_mic_peak);
+ 	// The engine not taking them: the queue fills, the rest are dropped, the encoder keeps running
+-	tx_blocks(P25_VOICE_TX_QUEUE + 3, 6000);
++	tx_blocks(P25_VOICE_TX_QUEUE + 3, 1000);
+ 	p25VoiceGetStats(&s);
+ 	CHECK(s.tx_encoded == 30 + P25_VOICE_TX_QUEUE + 3 && s.tx_dropped == 3, "full queue: %u encoded, %u dropped",
+ 	      (unsigned)s.tx_encoded, (unsigned)s.tx_dropped);
+@@ -305,17 +311,25 @@
+ 	p25VoiceTx(false);
+ 	p25VoiceTx(true);
+ 	mic_n = 0;
+-	tx_blocks(2, 1000);
++	uint32_t raw = tx_blocks(2, 250);
+ 	p25VoiceGetStats(&s);
+ 	uint32_t unity = s.tx_mic_peak;
++	CHECK(unity == 4 * raw, "12 dB transmit calibration: raw peak %u, encoder input %u", (unsigned)raw, (unsigned)unity);
+ 	p25VoiceTx(false);
+ 	p25VoiceSetMicGain(8);
+ 	p25VoiceTx(true);
+ 	mic_n = 0;
+-	tx_blocks(2, 1000);
++	tx_blocks(2, 250);
+ 	p25VoiceGetStats(&s);
+ 	CHECK(unity > 1000 && s.tx_mic_peak >= 2 * unity - 16 && s.tx_mic_peak <= 2 * unity, "mic peak %u, with gain %u",
+ 	      (unsigned)unity, (unsigned)s.tx_mic_peak);
++	// Maximum gain on a loud block saturates; it must not wrap around into quiet or negative samples
++	p25VoiceTx(false);
++	p25VoiceSetMicGain(10);
++	p25VoiceTx(true);
++	tx_blocks(1, 6000);
++	p25VoiceGetStats(&s);
++	CHECK(s.tx_mic_peak >= 32767, "maximum gain did not saturate a loud block: %u", (unsigned)s.tx_mic_peak);
+ 	p25VoiceSetMicGain(5);
+ 	p25VoiceTx(false);
+ 	// Reception after it: a call plays as before (the decoder starts over)
+--- a/docs/spec/p25.md
++++ b/docs/spec/p25.md
+@@ -132,6 +132,13 @@
+ the receiver will reconstruct: pitch code, voicing bits, the gain vector, the block DCT coefficients with the
+ standard's bit allocation. `imbe_unpack(imbe_pack(x))` gives back every frame's bits.
+ 
++Before encoding, the P25 voice path applies a fixed 12 dB (4x) PCM calibration, then the microphone gain, with
++saturation. The previous level was about 14 dB below the pinned Yazev IMBE reference encoder on the same harmonic
++signal. With the calibration, the transmitted frames decoded through both that reference and mbelib measured within
++2.2 dB of the reference encoder's level. This is a transmit-input calibration only: the decoder and its golden vectors
++are unchanged. YSF VW uses the same voice path and calibration. The microphone setting remains 2 dB per step around
++step 5.
++
+ The gain code sets the mean of a frame's log amplitudes, and its lowest value is a floor. A quiet frame with a few
+ harmonics far above the rest (hum, rumble) has a mean under it. The quantizer then raises the weak harmonics to a
+ common level, the lowest that brings the mean up to the floor, and leaves the strong ones as they are (coded as it
+@@ -269,7 +276,7 @@
+ | `tests/host/p25Test.c` | the NID against the standard's parity table, status symbol places, every field clean and through bit errors, the voice code word, a call through a noisy channel and the framer, the call layer both ways, late entry, an encrypted call |
+ | `tests/host/p25EngineTest.c` | two engines: a call heard with its fields and voice in order, an encoder that stalls, no encoder, the selective squelch, an abort |
+ | `tests/host/imbeEncTest.c` | the quantizer against the dequantizer (random frames, bit for bit); the estimator on made-up signals: pitch, harmonic amplitudes, voicing of tones and noise, level through the encoder and the decoder; a voice that starts at twice its period; quiet noise, zeros and a quiet hum; hum under noise |
+-| `tests/host/p25VoiceTest.c` | the voice path: playback timing, bad frames, overflow, a transmission (the stream starts, frames reach the hook, a full queue, the end, the microphone gain, reception after it) |
++| `tests/host/p25VoiceTest.c` | the voice path: playback timing, bad frames, overflow, a transmission (the stream starts, frames reach the hook, a full queue, the end, the 12 dB transmit calibration and microphone gain, reception after it) |
+ | `tests/host/airSoftmodemTest.c` | a call from discriminator samples to units |
+ | `tests/host/radioCoreTest.c` (`radioCoreTestP25`) | the radio core with a fake provider and a far engine: a call heard and its squelch, PTT through to the terminator and the transmitter off, refusals (inhibit, receive only, the board refusing to key, no fit, no lent memory), leaving P25 for DMR and FM, the VFO, the bench hook; a stored P25 channel: its parameters, selective squelch, a unit call, the session's unit ID, parked without a fit, the feature list; a zone scan over a stored P25 channel: stops there with nothing on air, holds on a late entry to its talk group until the call ends and the resume delay passes, moves on from another talk group and another NAC, never stops on it without a fit or as a trunked channel (`test_p25_scan`); dual watch with it as B: the engine at each look, a hold on its talk group's call, back to A after the delay, refused without a fit or as a trunked channel (`test_p25_dual`) |
+ | `tests/host/radioCoreTest.c` (`radioCoreTestP25T`) | the radio core on a P25 trunked channel against a trunked site on the fake provider, receive and transmit ([p25-trunking.md](p25-trunking.md) 7) |

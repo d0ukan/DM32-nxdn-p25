@@ -1,4 +1,4 @@
-# DM32-nxdn-p25 — NXDN-P25-DM32 multimodo (FM · AM · DMR · P25 · NXDN) para el Baofeng DM-32UV
+# DM32-nxdn-p25 — NXDN-P25-DM32 multimodo (FM · AM · DMR · P25 · NXDN · YSF) para el Baofeng DM-32UV
 
 [![Regálame un radio en Throne](https://img.shields.io/badge/Throne-Reg%C3%A1lame%20un%20radio-ff69b4?style=for-the-badge)](https://throne.com/lyraarsgoetia) [![Apóyame en Ko-fi](https://img.shields.io/badge/Ko--fi-Ap%C3%B3yame-ff5e5b?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/lyraarsgoetia)
 
@@ -6,8 +6,8 @@
 
 Unete a mi grupo de telegram <https://t.me/+fGNVb8mR-eliYmMx>
 
-Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, AM, DMR (Tier II y **Tier III troncal**), **APCO P25 fase 1**
-y **NXDN48/NXDN96**, con **AES-256** en DMR, P25 y NXDN. Desde el 17 de noviembre de 2026 se compila sobre
+Firmware abierto y multimodo para el **Baofeng DM-32UV**: FM, AM, DMR (Tier II y **Tier III troncal**), **APCO P25 fase 1**,
+**NXDN48/NXDN96** y **YSF (V/D-1, DN y VW)**, con **AES-256** en DMR, P25 y NXDN y **ARC4 Motorola** en DMR. Desde el 17 de noviembre de 2026 se compila sobre
 [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry) actual (commit `e89121e9`), que ya trae P25 y NXDN, más
 los cambios de esta rama en [`integration/current/base.patch`](integration/current/base.patch). Deriva de
 [Open25-DM32](https://github.com/tylerwatt12/Open25-DM32) (tylerwatt12). La mantiene **lyra XE1POC**.
@@ -16,19 +16,27 @@ los cambios de esta rama en [`integration/current/base.patch`](integration/curre
 >
 > **Sobre AES-256:** solo para sistemas comerciales / Part 90 autorizados para cifrar. No lo uses en bandas de radioaficionado: el servicio de aficionados es en claro, aun con licencia.
 
-## Estado (18 de noviembre de 2026, main `3e83541`)
+## Estado (22 de noviembre de 2026)
 
-Última release al escribir esto: `v2026.11.18-8d018382` (el CI está compilando la nueva con el all-call; el flasher todavía sirve `d30230a8`).
+La release instalable más reciente está en [Releases](../../releases); el flasher sincroniza la imagen publicada por CI. Las pruebas host no sustituyen una medición acústica o de RF.
 
 | Función | Estado |
 |---|---|
 | Base | RadioFoundry `e89121e9`, instalada y arrancando en la radio del autor, más `integration/current/base.patch`. Trae la desviación de TX de P25/NXDN medida en el HR_C7000 (RadioFoundry #644) |
+| Selectores digitales rápidos | En **Menú rápido**, **Code** edita NAC/RAN/DG-ID; **TG** introduce el grupo de P25/NXDN y **Dest** edita el destino YSF. Son cambios temporales hasta guardar el canal |
+| Escaneo de zona | **Herramientas › Zone Scan Speed** ajusta la espera en canales sin actividad hasta 25 ms; el tiempo de adquisición de una señal digital y el hang de una llamada no se acortan |
+| Nivel de voz P25/VW | Entrada PCM del codificador IMBE calibrada a ×4 (12 dB) con saturación, no overflow; prueba host de ganancia y límites. Pendiente comparación acústica en el aire |
+| Dual watch | La tercera fila DMR elige una representación que conserve el color code completo junto al indicador PTT; port de RadioFoundry #856 y su follow-up, con `uiSim --layout` en 0 problemas |
+| DMon en dual watch NXDN | Cada canal conserva su propio monitor digital al alternar; press y release de Monitor actúan sobre el slot seleccionado aunque el dwell cambie al otro, y cambiar de canal/VFO limpia el latch. Regresión host con dos NXDN96, 500 alternancias y salto B→A entre press/release. El ruido de [#65](../../issues/65) sigue pendiente de prueba acústica en radio |
+| YSF | V/D-1, DN y VW, DG-ID, destino Group/CQ y metadatos de callsign. RX selecciona AMBE o IMBE según el `DT` recibido, aunque TX esté configurado en otro modo, y restaura el path de TX al terminar; regresión host cruzada con frames PCM y PTT. Falta confirmación con Pi-Star/radio en [#64](../../issues/64) |
+| ARC4 DMR | Motorola Enhanced Privacy (ALG `0x21`, clave de 5 bytes) en TX/RX y late entry. Pruebas host y [reporte de interoperabilidad de un usuario](../../issues/28#issuecomment-7068964195) |
 | NXDN96 en el aire | DSD+ sincroniza y decodifica llamadas NXDN96 de este firmware (18 nov, 13:45: TG 91, RID 321, RAN 22, tramas de voz fluyendo) |
+| NXDN96 troncal | RX acepta `RTCH` además de `RDCH`, sin relajar paridad LICH, USC/UDCH ni el filtro RAN; una llamada RTCH NXDN96 completa pasa en host. Falta probar sync y audio en el sistema trunked de [#65](../../issues/65) |
 | NXDN TX | El monitor de servicio de KN4SWB midió FSK error 19,3 % y desviación de símbolo 993 Hz (nominal 1050 Hz) en 441,1125 MHz. **All-call portado:** un canal sin talkgroup ya transmite destino all-call (`e6c105f`, `fix_dst()` en el engine NXDN, con test host). **40 Hz no portable:** el fix candidato (`d30230a`, `.flat_tx_hpf_hz = 40` en el tap de audio plano de la serie vieja) no tiene equivalente en este build — el TX NXDN va por el engine 4FSK nativo del HR_C7000 y la TX RAM lleva símbolos, no audio, así que no hay high-pass que pre-compensar (`3e83541`, documentado en `docs/spec/nxdn.md`). No se toca el gain ni la desviación. Re-medición de KN4SWB pendiente |
-| Modo por canal | Fila **Modo** en cada canal: FM, AM, DMR, P25, NXDN 4800, NXDN 9600 |
+| Modo por canal | Fila **Modo** en cada canal: FM, AM, DMR, P25, NXDN 4800, NXDN 9600 y YSF |
 | AM | Tipo de canal AM propio, solo RX, en cualquier frecuencia que sintonice el receptor (p. ej. banda aérea) |
 | Recepción ampliada | Activada por defecto. Solo RX fuera de las bandas de TX |
-| Monitor digital (DMon) | En P25 y NXDN: oye llamadas de cualquier grupo, NAC o RAN del canal |
+| Monitor digital (DMon) | En P25 y NXDN: oye llamadas de cualquier grupo, NAC o RAN del canal. El popup sigue el estado publicado por radio; `uiFlowTest` ejercita el orden real radio→UI |
 | AES-256 DMR | Formato Motorola (FID `0x10`, ALG `0x25`, ID de clave 1–255). Compatible en ambos sentidos con la DM‑32UV de fábrica en llamadas de grupo, en simplex y por repetidor, según las [pruebas en el aire de `01da5d26`](https://github.com/donttellmeimcute/DM32-nxdn-p25/issues/40#issuecomment-7021512953) |
 | AES-256 P25 | Formato TIA-102.AAAD-A (ALGID `0x84`, KID de 16 bits). El keystream coincide con el de OP25 para una clave y un MI de referencia. **Sin probar contra un Motorola u otra marca** |
 | AES-256 NXDN | Formato del estándar NXDN TS 1-D (cipher 3, KID 0-63, VCALL_IV). Coincide bit a bit con los 32 vectores de prueba del estándar. Entrada tardía: descifra desde la sesión siguiente (hasta 1,3 s). **Sin probar contra Icom o Kenwood** |
@@ -57,11 +65,13 @@ que ofrece el flasher. La serie de parches anterior queda en `integration/radiof
 El NAC/RAN de **TX** debe coincidir con el del otro equipo; Pi-Star usa NAC 293 y RAN 1. NXDN 4800 es el «VN» de Icom
 (6,25 kHz). Si el hotspot necesita un offset de cientos de Hz, corrige la radio en **Ajustes › Avanzado › Ajuste frec**.
 
+Para cambiar el grupo sin editar el codeplug, abre **Menú rápido › TG** en el canal P25 o NXDN e introduce el ID con el teclado o las flechas; en YSF, **Menú rápido › Dest** edita el callsign de destino. **Menú rápido › Code** cambia NAC, RAN o DG-ID según el modo. Estos valores son temporales; usa **Guardar canal** si quieres conservarlos.
+
 ### DMR AES-256 con el firmware de fábrica
 
 1. En el CPS de Baofeng, abre **Digital Encrypt Systems** y consulta la clave **AES256** de 32 bytes y su número en la columna **Encryption ID**. Usa el valor completo de 64 caracteres hexadecimales del editor de la clave. La cuadrícula puede ocultar los primeros ocho.
 2. En el CPS web, abre **Radio → Claves AES-256**, registra el mismo valor para **DMR** con ese **ID de clave** y selecciónalo en cada canal que lo use. Por ejemplo, una clave en la fila **No. 1** con **Encryption ID 4** debe quedar como **ID 4**.
-3. Guarda el codeplug y comprueba una llamada en cada sentido con el mismo grupo, CC y ranura. Para esta interoperabilidad ambos radios deben usar AES-256. Las entradas AES128 y ARC4 del CPS de fábrica quedan fuera de este procedimiento.
+3. Guarda el codeplug y comprueba una llamada en cada sentido con el mismo grupo, CC y ranura. Para este procedimiento ambos radios deben usar AES-256. **AES-128 no está implementado** ([#47](../../issues/47)); **ARC4** sí está disponible como clave DMR Motorola de 5 bytes ([#28](../../issues/28)).
 
 El importador de respaldos de fábrica requiere volver a cargar y asignar las claves manualmente. La ubicación de **Encryption ID** en el archivo `.data` sigue por confirmar. [Reporte de interoperabilidad y formato del respaldo](../../issues/42)
 
@@ -73,7 +83,7 @@ También puedes elegirlo con las flechas en **Canales → Editar canal → Clave
 y mantener **OK** para guardar. Cada modo muestra los IDs de su llave. DMR permite **Predeterminado
 de la radio**, que usa la configuración general de privacidad. P25 y NXDN permiten **Desactivado**.
 
-1. Usa el **web flasher**: <https://donttellmeimcute.github.io/dm32-web-cps-flasher/> (Chrome o Edge de escritorio, Web Serial), o descarga la imagen `.bin` sin códec de la última [release](../../releases). El flasher sincroniza cada varias horas, no al instante: si muestra una versión anterior a la última release de GitHub, espera a que corra su sincronización o baja el `.bin` de la release.
+1. Usa el **web flasher**: <https://donttellmeimcute.github.io/dm32-web-cps-flasher/> (Chrome o Edge de escritorio, Web Serial), o descarga la imagen `.bin` sin códec de la última [release](../../releases). El flasher recibe la versión publicada por CI; si todavía muestra la anterior, espera a su sincronización o baja el `.bin` directamente de GitHub.
 2. Pon la radio en modo actualización: apagada, mantén **PTT + SK1** al encenderla (LED verde).
 3. El flasher hace un respaldo, toma el códec AMBE de tu propia radio (o del archivo de firmware de fábrica que elijas) y lo instala junto al firmware.
 
@@ -86,7 +96,7 @@ Si necesitas el archivo original, Baofeng ofrece el [firmware oficial DM-32UV v1
 Linux (o WSL) con el toolchain C-SKY (`tools/bootstrap_toolchain.sh` y `tools/bootstrap_newlib.sh`, ver [docs/build.md](docs/build.md)):
 
 ```sh
-python3 tools/build_current.py      # build/current: RadioFoundry e89121e9 + integration/current/base.patch
+python3 tools/build_current.py      # build/current: RadioFoundry e89121e9 + integration/current/*.patch
 make -C build/current/tests/host voiceCipherTest nxdnEngineTestAes p25EngineTestAes
 ```
 
@@ -95,7 +105,7 @@ La imagen queda en `build/current/build/dm32/rfoundry_dm32.bin`. Detalle del cif
 Si usas `--tree`, elige un directorio dedicado y vacío la primera vez. Al volver a compilar en ese directorio,
 la herramienta restablece el commit base y elimina los archivos sin seguimiento fuera de `build/`.
 
-**Compilación y release automáticas:** cada commit a `main` hace que la acción `Firmware` (`.github/workflows/firmware.yml`) compile la imagen sin códec, pase las pruebas de cifrado, P25 y NXDN, y publique una release `v<AAAA.MM.DD>-<commit>` con `rfoundry-dm32-<versión>.bin`, su manifiesto `.json` y `SHA256SUMS`. El web flasher la instala solo en unos 15 minutos. Nunca descarga el firmware de fábrica ni el AMBE.
+**Compilación y release automáticas:** cada commit a `main` hace que la acción `Firmware` (`.github/workflows/firmware.yml`) compile la imagen sin códec, pase las pruebas host y publique una release `v<AAAA.MM.DD>-<commit>` con `rfoundry-dm32-<versión>.bin`, su manifiesto `.json` y `SHA256SUMS`. Después solicita la sincronización inmediata del web flasher (o la deja para su sincronización programada si no está configurado el secreto correspondiente). Nunca descarga el firmware de fábrica ni el AMBE.
 
 ## Apoya el proyecto
 
@@ -119,11 +129,10 @@ El proyecto se distribuye bajo [GPL-3.0-or-later](LICENSE) salvo que un archivo 
 
 ## English summary
 
-Multi-mode open firmware for the Baofeng DM-32UV: FM, AM, DMR (Tier II and Tier III trunking), P25 Phase 1 and
-NXDN48/NXDN96, with AES-256 voice on DMR (Motorola layout, decrypts a real recording with a published key), P25
-(TIA-102.AAAD-A layout, matches OP25's keystream) and NXDN (matches the
-NXDN TS 1-D test vectors). Since 2026-11-17 it builds on current [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry)
-(`e89121e9`) plus `integration/current/base.patch`; the old patch series no longer builds. Motorola-style talk permit tones. The first DMR PTT after NXDN/FM/P25 no longer goes out voiceless (`3f1c173`, host-tested; on-air confirmation still pending). DSD+ decodes NXDN96 calls from this firmware (18 Nov: TG 91, RID 321, RAN 22). A talkgroup-less NXDN channel now transmits all-call (`e6c105f`). The 40 Hz NXDN TX pre-compensation (`d30230a`) has no equivalent in this build — NXDN TX goes through the HR_C7000 native 4FSK slot engine, not an audio path — so it was documented as not portable (`3e83541`), not ported. Lost
+Multi-mode open firmware for the Baofeng DM-32UV: FM, AM, DMR (Tier II and Tier III trunking), P25 Phase 1,
+NXDN48/NXDN96 and YSF (V/D-1, DN and VW), with AES-256 voice on DMR (Motorola layout, verified with stock DM-32UV firmware), P25
+(TIA-102.AAAD-A layout, matches OP25's keystream) and NXDN (matches the NXDN TS 1-D test vectors), plus Motorola ARC4 on DMR. Since 2026-11-17 it builds on [RadioFoundry](https://github.com/RadioFoundry/RadioFoundry)
+(`e89121e9`) plus `integration/current/*.patch`; the old patch series no longer builds. Quick Code/TG/Dest selectors cover P25, NXDN and YSF. YSF RX follows the received VW/AMBE data type and restores the configured TX voice path (host-tested); Pi-Star and on-radio confirmation remain open in #64. The dual-watch DMR row keeps the complete color code beside the PTT pill (RadioFoundry #856). Motorola-style talk permit tones. DMR PCM recovery after NXDN/FM/P25 is host-tested (`3f1c173`); hotspot wake-up and on-air confirmation remain open in #62. DSD+ decodes NXDN96 calls from this firmware (18 Nov: TG 91, RID 321, RAN 22). A talkgroup-less NXDN channel now transmits all-call (`e6c105f`). The 40 Hz NXDN TX pre-compensation (`d30230a`) has no equivalent in this build — NXDN TX goes through the HR_C7000 native 4FSK slot engine, not an audio path — so it was documented as not portable (`3e83541`), not ported. Lost
 in the switch: P25 Phase 2, P25 trunking TX; AES keys must be loaded again. The pink theme is back as the Kawaii layer (`7c972f0`). Releases ship the image **without** the proprietary AMBE
 codec; the [web flasher](https://donttellmeimcute.github.io/dm32-web-cps-flasher/) takes it from your own radio.
 DMR AES-256 group calls were verified over the air in both directions with stock Baofeng DM-32UV firmware, on simplex and through a repeater. In Baofeng CPS, **Encryption ID** is the on-air key ID. Use that ID and the same full 32-byte key when entering the key manually in the web CPS. [Interoperability report](../../issues/42)

@@ -1,0 +1,221 @@
+diff --git a/core/nxdn/nxdn_rx.c b/core/nxdn/nxdn_rx.c
+index 724995f..d366d10 100644
+--- a/core/nxdn/nxdn_rx.c
++++ b/core/nxdn/nxdn_rx.c
+@@ -18,12 +18,13 @@ static bool superframe(int16_t lich)
+ 	return lich >= 0 && (NXDN_LICH_USC(lich) == NXDN_USC_SACCH_SF || NXDN_LICH_USC(lich) == NXDN_USC_SACCH_SF_IDLE);
+ }
+ 
+-// A conventional voice channel's frame: RDCH, SACCH (not UDCH)
++// A conventional or trunked voice channel's frame: RDCH/RTCH, SACCH (not UDCH)
+ static bool lich_ok(const air_frame_t *f, int lich)
+ {
+ 	uint8_t inner = 0;
+ 
+-	if (lich < 0 || NXDN_LICH_RF(lich) != NXDN_RF_RDCH || NXDN_LICH_USC(lich) == NXDN_USC_UDCH)
++	if (lich < 0 || (NXDN_LICH_RF(lich) != NXDN_RF_RDCH && NXDN_LICH_RF(lich) != NXDN_RF_RTCH) ||
++	    NXDN_LICH_USC(lich) == NXDN_USC_UDCH)
+ 		return false;
+ 	for (uint8_t i = 0; i < 8; i++) {
+ 		if (f->soft) {
+diff --git a/core/radio/radio_sm.c b/core/radio/radio_sm.c
+index 5987c3f..7acb561 100644
+--- a/core/radio/radio_sm.c
++++ b/core/radio/radio_sm.c
+@@ -466,6 +466,11 @@ static bool clear_temporary(radio_sm_t *sm)
+ 		sm->view.ch.color_code = sm->base_cc;
+ 		sm->view.ch.timeslot = sm->base_ts;
+ 	}
++#if CONFIG_DMR
++	if (sm->hear_all_latch && (sm->latch_vfo != sm->view.vfo || sm->latch_ch != sm->view.channel_number)) {
++		sm->hear_all_latch = false;	// a channel/VFO change drops DMon even when the digital engine stays up
++	}
++#endif
+ 	set_temporary(sm);
+ 	return retune;
+ }
+@@ -1399,9 +1404,6 @@ static void dmr_load_channel(radio_sm_t *sm)
+ 	if (sm->manual && (sm->manual_vfo != sm->view.vfo || sm->manual_ch != sm->view.channel_number)) {
+ 		sm->manual = false;	// a chosen target lasts as long as its channel (temporary state, docs/ux)
+ 	}
+-	if (sm->hear_all_latch && (sm->latch_vfo != sm->view.vfo || sm->latch_ch != sm->view.channel_number)) {
+-		sm->hear_all_latch = false;	// so does the hear all latch
+-	}
+ 	if (sm->one_shot && (sm->view.vfo || sm->one_shot_ch != sm->view.channel_number)) {
+ 		sm->one_shot = false;		// and a one-shot target
+ 	}
+@@ -6166,8 +6168,11 @@ static uint8_t air_heard(const radio_sm_t *sm)
+ // On an air mode's channel, the board in its digital mode and tuned: the engine starts (dmr_end stopped any before)
+ static void air_begin(radio_sm_t *sm)
+ {
++	bool hear_all = hear_all_on(sm);
++	sm->view.dmr.hear_all_latch = hear_all;
++	sm->view.dmr.hear_all = hear_all;
+ #if CONFIG_YSF
+-	radio_ysf_monitor(hear_all_on(sm));
++	radio_ysf_monitor(hear_all);
+ 	if (sm->view.ch.mode == RADIO_MODE_YSF) {
+ 		radio_ysf_begin(&sm->view.ch, air_number(sm));
+ 		radio_ysf_poll(&sm->view.ysf);
+@@ -6175,7 +6180,7 @@ static void air_begin(radio_sm_t *sm)
+ 	}
+ #endif
+ #if CONFIG_NXDN
+-	radio_nxdn_monitor(hear_all_on(sm));
++	radio_nxdn_monitor(hear_all);
+ 	if (sm->view.ch.mode == RADIO_MODE_NXDN) {
+ 		radio_nxdn_begin(&sm->view.ch, air_number(sm));
+ 		radio_nxdn_poll(&sm->view.nxdn);
+@@ -6183,7 +6188,7 @@ static void air_begin(radio_sm_t *sm)
+ 	}
+ #endif
+ #if CONFIG_P25
+-	radio_p25_monitor(hear_all_on(sm));
++	radio_p25_monitor(hear_all);
+ 	radio_p25_begin(&sm->view.ch, air_number(sm), p25_own_id(sm));
+ 	radio_p25_poll(&sm->view.p25);
+ #endif
+@@ -8239,8 +8244,8 @@ void radio_sm_request(radio_sm_t *sm, const radio_req_t *req, uint32_t now_ms)
+ 			break;	// soft off: a monitor press that wakes the radio must not toggle digital monitor too
+ #if CONFIG_SCAN && CONFIG_DUAL_WATCH
+ 		// Before the DMR test: the receiver may be on the other channel, of the other mode
+-		if (req->arg == 1 && dual_running(sm)) {
+-			dual_to_selected(sm, now_ms);
++		if (dual_running(sm)) {
++			dual_to_selected(sm, now_ms);	// the command belongs to the selected slot on both press and release
+ 		}
+ #endif
+ #if CONFIG_DMR
+diff --git a/core/ui/ui_app.c b/core/ui/ui_app.c
+index 8fad1ab..ad37a3e 100644
+--- a/core/ui/ui_app.c
++++ b/core/ui/ui_app.c
+@@ -2357,7 +2357,7 @@ void ui_app_key(const input_event_t *ev)
+ #if CONFIG_DMR
+ 	if (ev->action == ACT_MONITOR && ev->gesture == GESTURE_UP && ev->value == 0 &&
+ 	    digital_monitor_mode(view->ch.mode) && !view->monitor)
+-		ui_toast(dmon_text(!view->dmr.hear_all_latch));
++		ui_toast(dmon_text(view->dmr.hear_all_latch));
+ #endif
+ 	if (ev->gesture == GESTURE_LONG && ev->value != 0 && !digital_monitor_mode(view->ch.mode))
+ 		return;
+diff --git a/tests/host/nxdnTest.c b/tests/host/nxdnTest.c
+index ed78f66..030d3f5 100644
+--- a/tests/host/nxdnTest.c
++++ b/tests/host/nxdnTest.c
+@@ -397,6 +397,27 @@ static void testCalls(void)
+ 	st = receive(&nxdn_air_mode_9600, 7, 0, true);
+ 	CHECK(got.starts == 1 && got.ends == 1 && got.voice == 16 && voice_in_order(0, 16) && st.facch_fail == 0,
+ 	      "9600: starts %u voice %u facch fails %u", got.starts, got.voice, st.facch_fail);
++
++	// A trunked traffic channel labels the same voice frames RTCH instead of RDCH. Keep parity, USC and RAN intact.
++	for (uint32_t at = call_at + NXDN_PREAMBLE_SYMS; at < call_at + NXDN_PREAMBLE_SYMS + 9 * NXDN_FRAME_SYMS;
++	     at += NXDN_FRAME_SYMS) {
++		uint8_t frame[NXDN_FRAME_BYTES] = { 0 };
++		for (uint16_t i = 0; i < NXDN_FRAME_SYMS; i++) {
++			air_sym_put(frame, i, tx_air[at + i]);
++		}
++		int lich = nxdn_lich_get(frame, NULL);
++		CHECK(lich >= 0 && NXDN_LICH_RF(lich) == NXDN_RF_RDCH, "RTCH setup LICH");
++		nxdn_frame_begin(frame, NXDN_LICH(NXDN_RF_RTCH, NXDN_LICH_USC(lich), NXDN_LICH_OPT(lich),
++		                                 NXDN_LICH_DIR(lich)));
++		for (uint16_t i = 0; i < NXDN_FRAME_SYMS; i++) {
++			tx_air[at + i] = air_sym_get(frame, i);
++		}
++	}
++	st = receive(&nxdn_air_mode_9600, 7, 0, true);
++	CHECK(got.starts == 1 && got.ends == 1 && got.voice == 16 && voice_in_order(0, 16) && st.lich_fail == 0 &&
++	      st.facch_fail == 0 && st.sacch_fail == 0,
++	      "NXDN96 RTCH: %u/%u/%u, fails %u/%u/%u", got.starts, got.ends, got.voice,
++	      st.lich_fail, st.facch_fail, st.sacch_fail);
+ }
+ 
+ int main(void)
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+index 41db49f..e502651 100644
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -8456,6 +8456,7 @@ static void test_nxdn_monitor(void)
+ 	radio_nxdn_settings_t s = nxdn_default_set;
+ 
+ 	setup_codeplug_nxdn();
++	add(4, "NXDN-B", 446200000, RADIO_MODE_NXDN, false, 3);
+ 	start();
+ 	nxdn_defaults();
+ 	aud.feed = true;
+@@ -8493,6 +8494,14 @@ static void test_nxdn_monitor(void)
+ 	nfar_begin(true, 1, 2001, false, 20);
+ 	nfar_call(600);
+ 	CHECK(sm.view.state == RS_IDLE);
++
++	// DMon is channel state, not mode state: another NXDN channel starts closed even without a DMR engine restart.
++	req(RREQ_MONITOR, 0);
++	run(50);
++	CHECK(sm.view.dmr.hear_all_latch);
++	req(RREQ_ZONE_POS, 3);
++	CHECK(sm.view.channel_number == 4 && sm.view.ch.mode == RADIO_MODE_NXDN);
++	CHECK(!sm.view.dmr.hear_all_latch && !sm.view.dmr.hear_all);
+ 	nfar_stop();
+ 	nxdn_defaults();
+ 	aud.feed = false;
+@@ -8871,6 +8880,20 @@ static void test_nxdn_dual(void)
+ 			monitored |= 2;
+ 	}
+ 	CHECK(monitored == 3);
++
++	// Both slots closed again. If the dwell moves B -> A while Monitor is down, its release still belongs to B.
++	CHECK(ui_svc_dual(pair, 0));
++	req(RREQ_DMR_HEAR_ALL, 0);
++	CHECK(ui_svc_dual(pair, 1));
++	req(RREQ_DMR_HEAR_ALL, 0);
++	CHECK(sm.dual_at == 1 && sm.view.channel_number == 3 && !sm.view.dmr.hear_all_latch);
++	req(RREQ_MONITOR, 1);
++	for (int i = 0; i < 100 && sm.dual_at != 0; i++)
++		run(RADIO_POLL_MS);
++	CHECK(sm.dual_at == 0 && sm.view.channel_number == 1 && !sm.view.dmr.hear_all_latch);
++	req(RREQ_MONITOR, 0);
++	CHECK(sm.dual_at == 1 && sm.view.channel_number == 3 && sm.view.dmr.hear_all_latch);
++	CHECK(!sm.dual_keep[0].hear_all_latch);
+ 	CHECK(ui_svc_dual(NULL, 0) && sm.view.scan == SCAN_OFF);
+ 	setup_codeplug_nxdn();
+ 	far_hz = 0;
+diff --git a/tests/host/sim/ui_sim.c b/tests/host/sim/ui_sim.c
+index fb5f45b..4231ce8 100644
+--- a/tests/host/sim/ui_sim.c
++++ b/tests/host/sim/ui_sim.c
+@@ -1530,8 +1530,7 @@ uint8_t ui_svc_vfo_copy(const radio_view_t *v)
+ }
+ void radio_req_monitor(bool down)
+ {
+-	if (down)
+-		to_selected();
++	to_selected();
+ 	// As the radio core (#19): on DMR, P25 and NXDN a short press toggles digital monitor on its release; FM holds it open
+ 	if ((view.ch.mode == RADIO_MODE_DMR || view.ch.mode == RADIO_MODE_P25 || view.ch.mode == RADIO_MODE_NXDN) &&
+ 	    !view.monitor) {
+@@ -2747,12 +2746,13 @@ static bool press(const char *name, bool lng, char *err, size_t len)
+ 		presses++;
+ 		if (a == ACT_MONITOR) {
+ 			input_event_t ev = { ACT_MONITOR, GESTURE_DOWN, 0 };
+-			ui_app_key(&ev);
++			// Keep the firmware's radio -> UI event order; reversing it hides the toast's view inversion.
+ 			radio_req_monitor(true);
++			ui_app_key(&ev);
+ 			advance(lng ? LONG_MS : PRESS_MS);
+ 			ev.gesture = GESTURE_UP;
+-			ui_app_key(&ev);
+ 			radio_req_monitor(false);
++			ui_app_key(&ev);
+ 			return true;
+ 		}
+ 		input_event_t ev = { a, (uint8_t)(lng ? GESTURE_LONG : GESTURE_PRESS), 0 };
+@@ -3128,8 +3128,8 @@ static bool run_token(char *t, char *err, size_t len)
+ 		if (down)
+ 			presses++;
+ 		input_event_t ev = { ACT_MONITOR, down ? GESTURE_DOWN : GESTURE_UP, 0 };
+-		ui_app_key(&ev);
+ 		radio_req_monitor(down);
++		ui_app_key(&ev);
+ 		advance(200);
+ 		return true;
+ 	}

@@ -1,0 +1,528 @@
+diff --git a/core/radio/radio_ysf.c b/core/radio/radio_ysf.c
+--- a/core/radio/radio_ysf.c
++++ b/core/radio/radio_ysf.c
+@@ -38,6 +38,18 @@
+ static ysf_engine_t *eng;		// while running
+ static bool tx_ambe_ready;		// radio task publishes it to the provider task
+ static radio_ysf_stats_t stats;
++
++#define YSF_PATH_NONE	0u
++#define YSF_PATH_AMBE	1u
++#define YSF_PATH_VW	2u
++
++// RX may arrive in a different voice mode from the configured TX mode. The
++// provider requests a path; only the radio task switches the shared vocoder
++// memory and audio stream.
++static volatile uint8_t rx_request, rx_path, voice_path, voice_failed;
++static volatile uint32_t rx_seq;
++static uint32_t rx_handled;
++static bool rx_audio;
+ static uint32_t rx_calls_base, tx_calls_base, filler_base, rejects_base, frames_base, voice_base;
+ static air_session_stats_t air_base;
+ 
+@@ -198,29 +210,49 @@
+ // the provider's task, which is the only one feeding that path while YSF runs (the DMR stack is stopped); the
+ // audio stream is started and stopped by the radio task (begin, end). Data units have no sink yet: they are dropped
+ // on receive and sent zeroed ──
++static uint8_t path_for_dt(uint8_t dt)
++{
++	if (dt == YSF_DT_VD_MODE1 || dt == YSF_DT_VD_MODE2)
++		return YSF_PATH_AMBE;
++#if CONFIG_P25 && CONFIG_IMBE
++	if (dt == YSF_DT_VOICE_FR)
++		return YSF_PATH_VW;
++#endif
++	return YSF_PATH_NONE;
++}
++
++static void request_path(uint8_t path)
++{
++	__atomic_store_n(&rx_request, path, __ATOMIC_RELEASE);
++	uint32_t seq = __atomic_load_n(&rx_seq, __ATOMIC_RELAXED) + 1;
++	__atomic_store_n(&rx_seq, seq, __ATOMIC_RELEASE); // one writer: the provider task
++}
++
+ static void v_start(const ysf_call_t *call, void *ctx)
+ {
++	(void)ctx;
++	__atomic_store_n(&rx_audio, false, __ATOMIC_RELEASE);
++	__atomic_store_n(&voice_failed, YSF_PATH_NONE, __ATOMIC_RELEASE);
++	request_path(path_for_dt(call->fich.dt));
++}
++
++static void v_voice(const uint8_t vch[9], void *ctx)
++{
+ 	const dmr_voice_sink_t *s = ambeVoiceSink();
+ 
+-	(void)call;
+ 	(void)ctx;
+-	s->begin(NULL, s->ctx);
+-}
+-
+-static void v_voice(const uint8_t vch[9], void *ctx)
+-{
+-	const dmr_voice_sink_t *s = ambeVoiceSink();
+-
++	if (__atomic_load_n(&rx_request, __ATOMIC_ACQUIRE) != YSF_PATH_AMBE ||
++	    __atomic_load_n(&rx_path, __ATOMIC_ACQUIRE) != YSF_PATH_AMBE)
++		return;
++	s->frame(vch, s->ctx);
++	__atomic_store_n(&rx_audio, true, __ATOMIC_RELEASE);
++}
++
++static void v_end(void *ctx)
++{
+ 	(void)ctx;
+-	s->frame(vch, s->ctx);
+-}
+-
+-static void v_end(void *ctx)
+-{
+-	const dmr_voice_sink_t *s = ambeVoiceSink();
+-
+-	(void)ctx;
+-	s->end(s->ctx);
++	__atomic_store_n(&rx_audio, false, __ATOMIC_RELEASE);
++	request_path(YSF_PATH_NONE);
+ }
+ 
+ static bool v_tx(uint8_t vch[9], void *ctx)
+@@ -230,9 +262,6 @@
+ 	(void)ctx;
+ 	return __atomic_load_n(&tx_ambe_ready, __ATOMIC_ACQUIRE) && s->next(vch, s->ctx);
+ }
+-
+-static const ysf_engine_hooks_t voice_hooks = { .rx_start = v_start, .rx_voice = v_voice, .rx_end = v_end,
+-						 .tx_voice = v_tx };
+ 
+ // The encoder runs from the header on, so the first voice frames are ready when the engine asks
+ static void voice_tx(bool on)
+@@ -271,35 +300,27 @@
+ 	return m != NULL && len >= sizeof(p25_voice_mem_t) && ((uintptr_t)m & 7u) == 0 ? m : NULL;
+ }
+ 
+-static bool vw_rx_open;	// provider task, while it owns the YSF session
+-
+-static void vw_start(const ysf_call_t *call, void *ctx)
+-{
+-	vw_rx_open = call->fich.dt == YSF_DT_VOICE_FR;
+-	if (vw_rx_open)
+-		p25VoiceHooks()->rx_start(NULL, ctx);
+-}
+-
+-static void vw_end(void *ctx)
+-{
+-	if (vw_rx_open)
+-		p25VoiceHooks()->rx_end(ctx);
+-	vw_rx_open = false;
+-}
+-
+ static void vw_voice(const uint8_t imbe[FEC_IMBE88_BYTES], uint8_t errs, void *ctx)
+ {
++	if (__atomic_load_n(&rx_request, __ATOMIC_ACQUIRE) != YSF_PATH_VW ||
++	    __atomic_load_n(&rx_path, __ATOMIC_ACQUIRE) != YSF_PATH_VW)
++		return;
+ 	p25VoiceHooks()->rx_voice(imbe, errs, ctx);
++	__atomic_store_n(&rx_audio, true, __ATOMIC_RELEASE);
+ }
+ 
+ static bool vw_next(uint8_t imbe[FEC_IMBE88_BYTES], void *ctx)
+ {
+ 	return p25VoiceHooks()->tx_voice(imbe, ctx);
+ }
+-
+-static const ysf_engine_hooks_t vw_hooks = { .rx_start = vw_start, .rx_end = vw_end,
+-					      .rx_vw = vw_voice, .tx_vw = vw_next };
+-#endif
++#endif
++
++static const ysf_engine_hooks_t voice_hooks = {
++	.rx_start = v_start, .rx_voice = v_voice, .rx_end = v_end, .tx_voice = v_tx,
++#if CONFIG_P25 && CONFIG_IMBE
++	.rx_vw = vw_voice, .tx_vw = vw_next,
++#endif
++};
+ 
+ static void voice_end(bool vw)
+ {
+@@ -312,6 +333,87 @@
+ 	(void)vw;
+ #endif
+ 	ambeVoiceStop();
++}
++
++static uint8_t configured_path(void)
++{
++#if CONFIG_P25 && CONFIG_IMBE
++	if (eng->cfg.dt == YSF_DT_VOICE_FR)
++		return YSF_PATH_VW;
++#endif
++	return YSF_PATH_AMBE;
++}
++
++static bool voice_start(uint8_t path)
++{
++#if CONFIG_P25 && CONFIG_IMBE
++	if (path == YSF_PATH_VW) {
++		p25_voice_mem_t *mem = vw_mem_get();
++
++		if (mem == NULL)
++			return false;
++		p25VoiceBegin(mem, YSF_BLOCKS);
++		return true;
++	}
++#endif
++	if (path == YSF_PATH_AMBE) {
++		ambeVoiceStart();
++		return true;
++	}
++	return false;
++}
++
++// Serialize all vocoder and stream ownership changes in the radio task. The
++// configured TX path is restored whenever no receive voice call owns it.
++static void voice_poll(void)
++{
++	uint32_t seq = __atomic_load_n(&rx_seq, __ATOMIC_ACQUIRE);
++	uint8_t request = __atomic_load_n(&rx_request, __ATOMIC_ACQUIRE);
++	uint8_t active = __atomic_load_n(&rx_path, __ATOMIC_ACQUIRE);
++	uint8_t owner = __atomic_load_n(&voice_path, __ATOMIC_ACQUIRE);
++	uint8_t desired = request == YSF_PATH_NONE ? configured_path() : request;
++
++	if (active != YSF_PATH_NONE && (seq != rx_handled || active != request)) {
++		if (active == YSF_PATH_AMBE) {
++			const dmr_voice_sink_t *s = ambeVoiceSink();
++			s->end(s->ctx);
++		}
++#if CONFIG_P25 && CONFIG_IMBE
++		else if (active == YSF_PATH_VW) {
++			p25VoiceHooks()->rx_end(NULL);
++		}
++#endif
++		__atomic_store_n(&rx_path, YSF_PATH_NONE, __ATOMIC_RELEASE);
++	}
++	rx_handled = seq;
++	if (owner != desired && __atomic_load_n(&voice_failed, __ATOMIC_ACQUIRE) != desired) {
++		if (owner != YSF_PATH_NONE)
++			voice_end(owner == YSF_PATH_VW);
++		__atomic_store_n(&voice_path, YSF_PATH_NONE, __ATOMIC_RELEASE);
++		if (voice_start(desired)) {
++			__atomic_store_n(&voice_path, desired, __ATOMIC_RELEASE);
++			__atomic_store_n(&voice_failed, YSF_PATH_NONE, __ATOMIC_RELEASE);
++		} else {
++			__atomic_store_n(&voice_failed, desired, __ATOMIC_RELEASE);
++		}
++	}
++	if (request != YSF_PATH_NONE && __atomic_load_n(&rx_path, __ATOMIC_ACQUIRE) == YSF_PATH_NONE &&
++	    __atomic_load_n(&voice_path, __ATOMIC_ACQUIRE) == request) {
++		if (request == YSF_PATH_AMBE) {
++			const dmr_voice_sink_t *s = ambeVoiceSink();
++			s->begin(NULL, s->ctx);
++		}
++#if CONFIG_P25 && CONFIG_IMBE
++		else if (request == YSF_PATH_VW) {
++			p25VoiceHooks()->rx_start(NULL, NULL);
++		}
++#endif
++		__atomic_store_n(&rx_path, request, __ATOMIC_RELEASE);
++	}
++#if CONFIG_P25 && CONFIG_IMBE
++	if (__atomic_load_n(&voice_path, __ATOMIC_ACQUIRE) == YSF_PATH_VW)
++		p25VoicePoll();
++#endif
+ }
+ 
+ static ysf_engine_t *mem_get(void)
+@@ -341,30 +443,35 @@
+ 		stats.begin_fails++;
+ 		return false;
+ 	}
+-	const ysf_engine_hooks_t *hooks = &voice_hooks;
+ 	bool vw = cfg.dt == YSF_DT_VOICE_FR;
++	uint8_t path = YSF_PATH_AMBE;
+ 
+ 	if (vw) {
+ #if CONFIG_P25 && CONFIG_IMBE
+-		p25_voice_mem_t *mem = vw_mem_get();
+-
+-		if (mem != NULL) {
+-			vw_rx_open = false;
+-			p25VoiceBegin(mem, YSF_BLOCKS);
+-			cfg.silence_vw = imbe_silence;
+-			hooks = &vw_hooks;
+-		}
+-#endif
+-		if (!cfg.silence_vw) {
+-			eng = NULL;
+-			stats.begin_fails++;
+-			return false;
+-		}
+-	} else {
+-		ambeVoiceStart();
+-	}
+-	if (!ysf_engine_begin(eng, board.air, &cfg, hooks, NULL)) {
++		path = YSF_PATH_VW;
++		cfg.silence_vw = imbe_silence;
++#else
++		eng = NULL;
++		stats.begin_fails++;
++		return false;
++#endif
++	}
++	__atomic_store_n(&rx_request, YSF_PATH_NONE, __ATOMIC_RELEASE);
++	__atomic_store_n(&rx_path, YSF_PATH_NONE, __ATOMIC_RELEASE);
++	__atomic_store_n(&rx_seq, 0, __ATOMIC_RELEASE);
++	rx_handled = 0;
++	__atomic_store_n(&voice_path, YSF_PATH_NONE, __ATOMIC_RELEASE);
++	__atomic_store_n(&voice_failed, YSF_PATH_NONE, __ATOMIC_RELEASE);
++	__atomic_store_n(&rx_audio, false, __ATOMIC_RELEASE);
++	if (!voice_start(path)) {
++		eng = NULL;
++		stats.begin_fails++;
++		return false;
++	}
++	__atomic_store_n(&voice_path, path, __ATOMIC_RELEASE);
++	if (!ysf_engine_begin(eng, board.air, &cfg, &voice_hooks, NULL)) {
+ 		voice_end(vw);
++		__atomic_store_n(&voice_path, YSF_PATH_NONE, __ATOMIC_RELEASE);
+ 		eng = NULL;
+ 		stats.begin_fails++;
+ 		return false;
+@@ -380,7 +487,23 @@
+ 		return;
+ 	ysf_engine_end(eng);	// the provider closed: no hook runs after this
+ 	__atomic_store_n(&tx_ambe_ready, false, __ATOMIC_RELEASE);
+-	voice_end(eng->cfg.dt == YSF_DT_VOICE_FR);
++	uint8_t active = __atomic_load_n(&rx_path, __ATOMIC_ACQUIRE);
++	if (active == YSF_PATH_AMBE) {
++		const dmr_voice_sink_t *s = ambeVoiceSink();
++		s->end(s->ctx);
++	}
++#if CONFIG_P25 && CONFIG_IMBE
++	else if (active == YSF_PATH_VW) {
++		p25VoiceHooks()->rx_end(NULL);
++	}
++#endif
++	__atomic_store_n(&rx_path, YSF_PATH_NONE, __ATOMIC_RELEASE);
++	__atomic_store_n(&rx_request, YSF_PATH_NONE, __ATOMIC_RELEASE);
++	__atomic_store_n(&rx_audio, false, __ATOMIC_RELEASE);
++	uint8_t owner = __atomic_load_n(&voice_path, __ATOMIC_ACQUIRE);
++	if (owner != YSF_PATH_NONE)
++		voice_end(owner == YSF_PATH_VW);
++	__atomic_store_n(&voice_path, YSF_PATH_NONE, __ATOMIC_RELEASE);
+ 	eng = NULL;
+ }
+ 
+@@ -485,21 +608,14 @@
+ 		n.flags = 0;
+ 		n.tx = AIR_TX_IDLE;
+ 	} else {
+-#if CONFIG_P25 && CONFIG_IMBE
+-		if (eng->cfg.dt == YSF_DT_VOICE_FR)
+-			p25VoicePoll();
+-#endif
++		voice_poll();
+ 		ysf_engine_view(eng, &ev);
+ 		count(&ev);
+ 		memset(&n, 0, sizeof(n));
+ 		n.flags = RADIO_YSF_ON;
+ 		if (ev.rx_active) {
+ 			n.flags |= RADIO_YSF_RX;
+-			bool vw = eng->cfg.dt == YSF_DT_VOICE_FR;
+-			bool voice = vw ? ev.rx.fich.dt == YSF_DT_VOICE_FR :
+-				ev.rx.fich.dt == YSF_DT_VD_MODE1 || ev.rx.fich.dt == YSF_DT_VD_MODE2;
+-
+-			if (ev.rx_played && voice)
++			if (__atomic_load_n(&rx_audio, __ATOMIC_ACQUIRE))
+ 				n.flags |= RADIO_YSF_PLAYED;
+ 		}
+ 		if (ev.rx.late)
+@@ -529,6 +645,11 @@
+ static bool ysf_tx_prepare(void)
+ {
+ 	if (eng == NULL)
++		return false;
++	if (__atomic_load_n(&voice_path, __ATOMIC_ACQUIRE) != configured_path() &&
++	    __atomic_load_n(&rx_request, __ATOMIC_ACQUIRE) == YSF_PATH_NONE)
++		voice_poll();
++	if (__atomic_load_n(&voice_path, __ATOMIC_ACQUIRE) != configured_path())
+ 		return false;
+ 	air_session_tx_preamble(&eng->session, 0x77, 200);
+ 	if (!ysf_engine_tx_prepare(eng))
+diff --git a/tests/host/radioCoreTest.c b/tests/host/radioCoreTest.c
+--- a/tests/host/radioCoreTest.c
++++ b/tests/host/radioCoreTest.c
+@@ -9297,6 +9297,78 @@
+ }
+ #endif
+ 
++#if CONFIG_YSF && CONFIG_P25 && CONFIG_IMBE
++#include "ysf/ysf_engine.h"
++
++static ysf_engine_t yfar;
++static bool yfar_running, yfar_tx;
++
++static bool yfar_ambe(uint8_t vch[9], void *ctx)
++{
++	(void)ctx;
++	memcpy(vch, dmr_ambe_silence, 9);
++	return true;
++}
++
++static bool yfar_imbe(uint8_t imbe[FEC_IMBE88_BYTES], void *ctx)
++{
++	(void)ctx;
++	memcpy(imbe, imbe_silence, FEC_IMBE88_BYTES);
++	return true;
++}
++
++static const ysf_engine_hooks_t yfar_hooks = { .tx_voice = yfar_ambe, .tx_vw = yfar_imbe };
++
++static void yfar_begin(uint8_t dt)
++{
++	ysf_engine_cfg_t c = { .dt = dt, .narrow = false, .silence = dmr_ambe_silence,
++		.silence_vw = imbe_silence };
++
++	if (yfar_running)
++		ysf_engine_end(&yfar);
++	memset(c.dest, ' ', sizeof c.dest);
++	memset(c.src, ' ', sizeof c.src);
++	memcpy(c.dest, "ALL", 3);
++	memcpy(c.src, "XE1XYZ", 6);
++	yfar_tx = false;
++	yfar_running = ysf_engine_begin(&yfar, &fake_air1, &c, &yfar_hooks, NULL);
++	CHECK(yfar_running);
++}
++
++static void yfar_start(void)
++{
++	CHECK(ysf_engine_tx_prepare(&yfar) && ysf_engine_tx_go(&yfar));
++	yfar_tx = true;
++}
++
++static void yfar_finish(void)
++{
++	ysf_engine_tx_abort(&yfar);
++	for (int i = 0; i < 50 && yfar_tx; i++)
++		run(10);
++	CHECK(!yfar_tx);
++	for (int i = 0; i < 200 && (sm.view.ysf.flags & RADIO_YSF_RX); i++)
++		run(20);
++	CHECK((sm.view.ysf.flags & RADIO_YSF_RX) == 0);
++}
++
++static void yfar_stop(void)
++{
++	if (yfar_running) {
++		ysf_engine_end(&yfar);
++		yfar_running = yfar_tx = false;
++	}
++}
++
++static void yfar_step(void)
++{
++	if (yfar_tx && ysf_engine_tx_state(&yfar) == AIR_TX_DONE) {
++		ysf_engine_tx_clear(&yfar);
++		yfar_tx = false;
++	}
++}
++#endif
++
+ #if CONFIG_AIR
+ static void air_step(void)
+ {
+@@ -9307,6 +9379,9 @@
+ #endif
+ #if CONFIG_NXDN
+ 	nfar_step();
++#endif
++#if CONFIG_YSF && CONFIG_P25 && CONFIG_IMBE
++	yfar_step();
+ #endif
+ }
+ #endif
+@@ -10977,6 +11052,74 @@
+ 	CHECK(strcmp(cc.id.src, "XE1ABC") == 0);
+ 	kv_t3_clear();
+ 	cp_radio_name = "";
++}
++#endif
++
++#if CONFIG_YSF && CONFIG_P25 && CONFIG_IMBE
++static void test_ysf_cross_dt_rx(void)
++{
++	static const uint8_t configured[] = { YSF_DT_VOICE_FR, YSF_DT_VD_MODE2 };
++
++	for (unsigned i = 0; i < sizeof configured / sizeof configured[0]; i++) {
++		uint8_t incoming = configured[i] == YSF_DT_VOICE_FR ? YSF_DT_VD_MODE2 : YSF_DT_VOICE_FR;
++		dmr_start(true);
++		sm.set.talk_permit = false;
++		cp_radio_name = "xe1abc";
++		req(RREQ_VFO, 1);
++		radio_ysf_settings_t y;
++		radio_ysf_settings(&y);
++		y.dt = configured[i];
++		y.narrow = false;
++		radio_req_ysf_settings(&y);
++		req(RREQ_MODE, RADIO_MODE_YSF);
++		CHECK(radio_ysf_running());
++		radio_ysf_reset_stats();
++		ambeVoiceResetStats();
++		p25VoiceResetStats();
++		aud.feed = true;
++		yfar_begin(incoming);
++		yfar_start();
++		run(700);
++		radio_ysf_stats_t st;
++		radio_ysf_stats(&st);
++		CHECK(st.rx_calls == 1 && sm.view.ysf.dt == incoming);
++		CHECK(st.voice > 0);
++		CHECK((sm.view.ysf.flags & RADIO_YSF_PLAYED) != 0);
++		if (incoming == YSF_DT_VOICE_FR) {
++			p25_voice_stats_t v;
++			p25VoiceGetStats(&v);
++			CHECK(v.rx_frames > 0);
++		} else {
++			ambe_voice_stats_t v;
++			ambeVoiceGetStats(&v);
++			CHECK(v.rx_frames > 0);
++		}
++		yfar_finish();
++		run(100);
++		radio_ysf_stats(&st);
++		uint32_t tx_calls = st.tx_calls;
++		req(RREQ_PTT, 1);
++		run(300);
++		CHECK(sm.view.state == RS_TX);
++		req(RREQ_PTT, 0);
++		run(700);
++		radio_ysf_stats(&st);
++		CHECK(st.tx_calls == tx_calls + 1 && st.tx_pcm_fails == 0);
++
++		// The configured path is restored for the next call, too.
++		uint32_t voice = st.voice;
++		yfar_begin(configured[i]);
++		yfar_start();
++		run(700);
++		radio_ysf_stats(&st);
++		CHECK(st.voice > voice && (sm.view.ysf.flags & RADIO_YSF_PLAYED) != 0);
++		yfar_finish();
++		yfar_stop();
++		run(100);
++		radio_ysf_end();
++		aud.feed = false;
++		cp_radio_name = "";
++	}
+ }
+ #endif
+ 
+@@ -11198,6 +11341,9 @@
+ 	test_ysf_pcm_handoff();
+ 	test_ysf_quick();
+ #endif
++#if CONFIG_YSF && CONFIG_P25 && CONFIG_IMBE
++	test_ysf_cross_dt_rx();
++#endif
+ #if CONFIG_P25 && CONFIG_NXDN && CONFIG_YSF
+ 	test_air_interop();
+ #endif
