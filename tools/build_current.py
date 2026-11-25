@@ -161,7 +161,10 @@ def out(*args, cwd=None):
 
 
 def prepare(tree, dstar=False):
-	if not (tree / '.git').exists():
+	git_dir = tree / '.git'
+	if git_dir.is_symlink() or (git_dir.exists() and not git_dir.is_dir()):
+		raise SystemExit(f'{tree} is a linked checkout: choose a separate build tree')
+	if not git_dir.exists():
 		tree.mkdir(parents=True, exist_ok=True)
 		if any(tree.iterdir()):
 			raise SystemExit(f'{tree} is not empty: choose a separate build tree')
@@ -173,6 +176,8 @@ def prepare(tree, dstar=False):
 	# Always from the pin: a tree left by an earlier build is reset, so the image is the patch's and nothing else
 	if out('git', 'rev-parse', 'HEAD', cwd=tree) != PIN:
 		raise SystemExit('%s is not at %s: remove it and build again' % (tree, PIN))
+	if out('git', 'rev-parse', '--abbrev-ref', 'HEAD', cwd=tree) != 'HEAD':
+		raise SystemExit(f'{tree} has a checked-out branch: choose a separate build tree')
 	run('git', 'reset', '-q', '--hard', PIN, cwd=tree)
 	run('git', 'clean', '-q', '-fdx', '-e', 'build/', cwd=tree)
 	for patch in PATCHES:

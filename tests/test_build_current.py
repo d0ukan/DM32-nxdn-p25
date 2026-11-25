@@ -24,6 +24,38 @@ class BuildTreeGuards(unittest.TestCase):
             self.assertEqual(existing.read_text(encoding='utf-8'), 'keep this file')
             self.assertFalse((tree / '.git').exists())
 
+    def test_refuses_linked_checkout(self):
+        with TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / '.git').write_text('gitdir: another-checkout\n', encoding='utf-8')
+            with patch.object(build_current, 'run') as run, patch.object(build_current, 'out') as out:
+                with self.assertRaisesRegex(SystemExit, 'linked checkout'):
+                    build_current.prepare(tree)
+                run.assert_not_called()
+                out.assert_not_called()
+
+    def test_refuses_branch_at_the_build_pin(self):
+        with TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / '.git').mkdir()
+            with patch.object(build_current, 'run') as run, patch.object(
+                build_current, 'out', side_effect=[build_current.PIN, 'main']
+            ):
+                with self.assertRaisesRegex(SystemExit, 'checked-out branch'):
+                    build_current.prepare(tree)
+                run.assert_not_called()
+
+    def test_allows_reusing_a_detached_build_tree(self):
+        with TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / '.git').mkdir()
+            with patch.object(build_current, 'run') as run, patch.object(
+                build_current, 'out', side_effect=[build_current.PIN, 'HEAD']
+            ), patch.object(build_current, 'PATCHES', ()):
+                build_current.prepare(tree)
+                run.assert_any_call('git', 'submodule', 'update', '--init', '--depth=1',
+                                    'third_party/FreeRTOS-Kernel', cwd=tree)
+
 
 if __name__ == '__main__':
     unittest.main()
